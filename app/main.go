@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-// 1. Define the necessary types for your new methods
 type RedirectionType int
 
 const (
@@ -33,7 +32,7 @@ type Shell struct {
 }
 
 var Builtins = map[string]bool{
-	"exit": true, "echo": true, "type": true, "cd": true,
+	"exit": true, "echo": true, "type": true, "cd": true, "pwd": true,
 }
 
 func main() {
@@ -52,14 +51,11 @@ func main() {
 			continue
 		}
 
-		// Simple Parser: In a real shell, you'd handle quotes and redirects here
-		// For now, let's just split by spaces to create a Command
 		parts := strings.Fields(input)
 		cmd := &Command{
 			Args: parts,
 		}
 
-		// Handle 'exit' immediately or via Execute
 		if cmd.Args[0] == "exit" {
 			os.Exit(0)
 		}
@@ -98,6 +94,11 @@ func (c *Command) executeBuiltin(shell *Shell) int {
 			fmt.Printf("%s: not found\n", arg)
 		}
 		return 0
+	case "pwd":
+		output, _ := os.Getwd()
+		fmt.Printf("%s\n", output)
+		return 0
+
 	}
 	return 1
 }
@@ -105,8 +106,6 @@ func (c *Command) executeBuiltin(shell *Shell) int {
 func (c *Command) executeExternal() int {
 
 	cmdName := c.Args[0]
-
-	// Find command in PATH
 
 	cmdPath := findInPath(cmdName)
 
@@ -118,19 +117,15 @@ func (c *Command) executeExternal() int {
 
 	}
 
-	// Create command
-
 	cmd := exec.Command(cmdPath, c.Args[1:]...)
 
-	cmd.Args = c.Args // Set argv to use original command name as argv[0]
+	cmd.Args = c.Args
 
 	cmd.Stdin = os.Stdin
 
 	cmd.Stdout = os.Stdout
 
 	cmd.Stderr = os.Stderr
-
-	// Apply redirections
 
 	for _, redir := range c.Redirections {
 
@@ -224,8 +219,6 @@ func (c *Command) executeExternal() int {
 
 func findInPath(cmdName string) string {
 
-	// If it's an absolute or relative path, check if it exists
-
 	if strings.Contains(cmdName, "/") || strings.Contains(cmdName, "\\") {
 
 		if isExecutable(cmdName) {
@@ -237,8 +230,6 @@ func findInPath(cmdName string) string {
 		return ""
 
 	}
-
-	// Search in PATH
 
 	pathEnv := os.Getenv("PATH")
 
