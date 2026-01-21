@@ -98,7 +98,8 @@ func (c *Command) executeBuiltin(shell *Shell) int {
 		output, _ := os.Getwd()
 		fmt.Printf("%s\n", output)
 		return 0
-
+	case "cd":
+		return doCd(c.Args[1:])
 	}
 	return 1
 }
@@ -284,4 +285,28 @@ func isExecutable(path string) bool {
 
 	return false
 
+}
+
+func doCd(args []string) int {
+	if len(args) == 0 {
+		home := os.Getenv("HOME")
+		if home == "" {
+			return 0
+		}
+		os.Chdir(home)
+		return 0
+	}
+
+	path := args[0]
+
+	if path == "~" {
+		path = os.Getenv("HOME")
+	}
+
+	if err := os.Chdir(path); err != nil {
+		fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n", path)
+		return 1
+	}
+
+	return 0
 }
