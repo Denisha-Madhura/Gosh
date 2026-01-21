@@ -29,11 +29,10 @@ type Command struct {
 }
 
 type Shell struct {
-	// You can add shell state here (like environment variables)
 }
 
 var Builtins = map[string]bool{
-	"exit": true, "echo": true, "type": true, "cd": true,
+	"exit": true, "echo": true, "type": true, "cd": true, "pwd": true,
 }
 
 func main() {
@@ -95,118 +94,219 @@ func (c *Command) executeBuiltin(shell *Shell) int {
 			fmt.Printf("%s: not found\n", arg)
 		}
 		return 0
+	case "pwd":
+		output, _ := os.Getwd()
+		fmt.Printf("%s\n", output)
+		return 0
+	case "cd":
+		return doCd(c.Args[1:])
 	}
 	return 1
 }
 
 func (c *Command) executeExternal() int {
+
 	cmdName := c.Args[0]
 
 	cmdPath := findInPath(cmdName)
+
 	if cmdPath == "" {
+
 		fmt.Fprintf(os.Stdout, "%s: command not found\n", cmdName)
+
 		return 127
+
 	}
 
 	cmd := exec.Command(cmdPath, c.Args[1:]...)
+
 	cmd.Args = c.Args
+
 	cmd.Stdin = os.Stdin
+
 	cmd.Stdout = os.Stdout
+
 	cmd.Stderr = os.Stderr
 
 	for _, redir := range c.Redirections {
+
 		switch redir.Type {
+
 		case TokenRedirectOut:
+
 			f, err := os.Create(redir.Filename)
+
 			if err != nil {
+
 				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
+
 				return 1
+
 			}
+
 			defer f.Close()
+
 			cmd.Stdout = f
 
 		case TokenRedirectAppend:
+
 			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+
 			if err != nil {
+
 				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
+
 				return 1
+
 			}
+
 			defer f.Close()
+
 			cmd.Stdout = f
 
 		case TokenRedirectIn:
+
 			f, err := os.Open(redir.Filename)
+
 			if err != nil {
+
 				fmt.Fprintf(os.Stderr, "%s: %s: No such file or directory\n", cmdName, redir.Filename)
+
 				return 1
+
 			}
+
 			defer f.Close()
+
 			cmd.Stdin = f
 
 		case TokenRedirect2:
+
 			f, err := os.Create(redir.Filename)
+
 			if err != nil {
+
 				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
+
 				return 1
+
 			}
+
 			defer f.Close()
+
 			cmd.Stderr = f
+
 		}
+
 	}
 
 	err := cmd.Run()
+
 	if err != nil {
+
 		if exitErr, ok := err.(*exec.ExitError); ok {
+
 			return exitErr.ExitCode()
+
 		}
+
+		return 1
+
+	}
+
+	return 0
+
+}
+
+func findInPath(cmdName string) string {
+
+	if strings.Contains(cmdName, "/") || strings.Contains(cmdName, "\\") {
+
+		if isExecutable(cmdName) {
+
+			return cmdName
+
+		}
+
+		return ""
+
+	}
+
+	pathEnv := os.Getenv("PATH")
+
+	paths := filepath.SplitList(pathEnv)
+
+	for _, dir := range paths {
+
+		fullPath := filepath.Join(dir, cmdName)
+		if isExecutable(fullPath) {
+
+			return fullPath
+
+		}
+
+		if fullPath+".exe" != fullPath {
+
+			if isExecutable(fullPath + ".exe") {
+
+				return fullPath + ".exe"
+
+			}
+
+		}
+
+	}
+
+	return ""
+
+}
+
+func isExecutable(path string) bool {
+
+	info, err := os.Stat(path)
+
+	if err != nil {
+
+		return false
+
+	}
+
+	if !info.Mode().IsRegular() {
+
+		return false
+
+	}
+
+	if info.Mode().Perm()&0111 != 0 {
+
+		return true
+
+	}
+
+	return false
+
+}
+
+func doCd(args []string) int {
+	if len(args) == 0 {
+		home := os.Getenv("HOME")
+		if home == "" {
+			return 0
+		}
+		os.Chdir(home)
+		return 0
+	}
+
+	path := args[0]
+
+	if path == "~" {
+		path = os.Getenv("HOME")
+	}
+
+	if err := os.Chdir(path); err != nil {
+		fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n", path)
 		return 1
 	}
 
 	return 0
-}
-
-func findInPath(cmdName string) string {
-	if strings.Contains(cmdName, "/") || strings.Contains(cmdName, "\\") {
-		if isExecutable(cmdName) {
-			return cmdName
-		}
-		return ""
-	}
-
-	pathEnv := os.Getenv("PATH")
-	paths := filepath.SplitList(pathEnv)
-
-	for _, dir := range paths {
-		fullPath := filepath.Join(dir, cmdName)
-
-		if isExecutable(fullPath) {
-			return fullPath
-		}
-
-		if fullPath+".exe" != fullPath {
-			if isExecutable(fullPath + ".exe") {
-				return fullPath + ".exe"
-			}
-		}
-	}
-
-	return ""
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-
-	// Check if it's a regular file
-	if !info.Mode().IsRegular() {
-		return false
-	}
-
-	if info.Mode().Perm()&0111 != 0 {
-		return true
-	}
-
-	return false
 }
