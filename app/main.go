@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/google/shlex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,7 +52,7 @@ func main() {
 			continue
 		}
 
-		parts := strings.Fields(input)
+		parts, _ := shlex.Split(input)
 		cmd := &Command{
 			Args: parts,
 		}
