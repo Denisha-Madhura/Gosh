@@ -38,16 +38,12 @@ Supports standard file redirection operators:
 
 ### Build and Run
 1. **Clone the repository:**
-   ```bash
-   git clone [repository](https://github.com/denisha-madhura/Gosh.git)
-   ```
-   cd gosh
-
-Install Dependencies: This project uses google/shlex for POSIX-compliant argument parsing.
-
 ```bash
-go get [github.com/google/shlex](https://github.com/google/shlex)
+git clone [repository](https://github.com/denisha-madhura/Gosh.git)  
+cd gosh
 ```
+
+
 Build the Shell:
 
 ```bash
