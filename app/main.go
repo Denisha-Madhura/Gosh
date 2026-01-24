@@ -3,12 +3,11 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/google/shlex"
 )
 
 type RedirectionType int
@@ -18,6 +17,7 @@ const (
 	TokenRedirectAppend
 	TokenRedirectIn
 	TokenRedirect2
+	TokenRedirect22
 )
 
 type Redirection struct {
@@ -46,7 +46,6 @@ func InputParser(input string) (string, []string) {
 	quoteChar := rune(0)
 
 	for _, ch := range input {
-
 		if preserveNextLiteral {
 			word.WriteRune(ch)
 			preserveNextLiteral = false
@@ -114,57 +113,47 @@ func main() {
 
 	for {
 		fmt.Print("$ ")
-		// 1. Read input
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			break
 		}
 
-		// 2. Clean input (Don't slice manually!)
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
 
-		// 3. Parse with shlex (Handles quotes/backslashes correctly)
-		parts, err := shlex.Split(input)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error parsing input:", err)
-			continue
-		}
+		_, parts := InputParser(input)
 
-		// 4. Create the Command Struct
 		cmd := &Command{
 			Args:         []string{},
 			Redirections: []Redirection{},
 		}
 
-		// 5. Populate Args and Redirections
 		for i := 0; i < len(parts); i++ {
 			word := parts[i]
-			if (word == ">" || word == ">>" || word == "2>" || word == "<") && i+1 < len(parts) {
+			// Added "1>" to the check list
+			if (word == ">" || word == "1>" || word == ">>" || word == "1>>" || word == "2>" || word == "2>>" || word == "<") && i+1 < len(parts) {
 				var rType RedirectionType
 				switch word {
-				case ">":
+				case ">", "1>": // Handle 1> exactly like >
 					rType = TokenRedirectOut
-				case ">>":
+				case ">>", "1>>":
 					rType = TokenRedirectAppend
 				case "2>":
 					rType = TokenRedirect2
 				case "<":
 					rType = TokenRedirectIn
+				case "2>>":
+					rType = TokenRedirect22
 				}
 				cmd.Redirections = append(cmd.Redirections, Redirection{Type: rType, Filename: parts[i+1]})
 				i++
 			} else {
-				// Handle the escaped characters cleanup if needed
-				cleanWord := strings.ReplaceAll(word, `\'`, `'`)
-				cleanWord = strings.ReplaceAll(cleanWord, `\"`, `"`)
-				cmd.Args = append(cmd.Args, cleanWord)
+				cmd.Args = append(cmd.Args, word)
 			}
 		}
 
-		// 6. Safety Checks
 		if len(cmd.Args) == 0 {
 			continue
 		}
@@ -173,7 +162,6 @@ func main() {
 			os.Exit(0)
 		}
 
-		// 7. Execute (Inside the loop!)
 		cmd.Execute(shell)
 	}
 }
@@ -193,10 +181,50 @@ func (c *Command) Execute(shell *Shell) int {
 }
 
 func (c *Command) executeBuiltin(shell *Shell) int {
+	// Standard output setup
+	var stdout io.Writer = os.Stdout
+
+	// Apply Redirections for Builtins
+	for _, redir := range c.Redirections {
+		switch redir.Type {
+		case TokenRedirectOut:
+			f, err := os.Create(redir.Filename)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+				return 1
+			}
+			defer f.Close()
+			stdout = f
+		case TokenRedirectAppend:
+			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+				return 1
+			}
+			defer f.Close()
+			stdout = f
+		case TokenRedirect2:
+			f, err := os.Create(redir.Filename)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+				return 1
+			}
+			defer f.Close()
+		case TokenRedirect22:
+			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+				return 1
+			}
+			defer f.Close()
+		}
+	}
+
 	cmdName := c.Args[0]
 	switch cmdName {
 	case "echo":
-		fmt.Println(strings.Join(c.Args[1:], " "))
+		// Use Fprintln with the configured stdout
+		fmt.Fprintln(stdout, strings.Join(c.Args[1:], " "))
 		return 0
 	case "type":
 		if len(c.Args) < 2 {
@@ -204,16 +232,16 @@ func (c *Command) executeBuiltin(shell *Shell) int {
 		}
 		arg := c.Args[1]
 		if Builtins[arg] {
-			fmt.Printf("%s is a shell builtin\n", arg)
+			fmt.Fprintf(stdout, "%s is a shell builtin\n", arg)
 		} else if path := findInPath(arg); path != "" {
-			fmt.Printf("%s is %s\n", arg, path)
+			fmt.Fprintf(stdout, "%s is %s\n", arg, path)
 		} else {
-			fmt.Printf("%s: not found\n", arg)
+			fmt.Fprintf(stdout, "%s: not found\n", arg)
 		}
 		return 0
 	case "pwd":
 		output, _ := os.Getwd()
-		fmt.Printf("%s\n", output)
+		fmt.Fprintf(stdout, "%s\n", output)
 		return 0
 	case "cd":
 		return doCd(c.Args[1:])
@@ -231,6 +259,8 @@ func (c *Command) executeExternal() int {
 	}
 
 	cmd := exec.Command(cmdPath, c.Args[1:]...)
+	// FIX: Use the original command name as argv[0]
+	cmd.Args = c.Args
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -263,6 +293,14 @@ func (c *Command) executeExternal() int {
 			cmd.Stdin = f
 		case TokenRedirect2:
 			f, err := os.Create(redir.Filename)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
+				return 1
+			}
+			defer f.Close()
+			cmd.Stderr = f
+		case TokenRedirect22:
+			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
 				return 1
