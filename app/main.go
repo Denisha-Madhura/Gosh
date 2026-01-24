@@ -108,45 +108,63 @@ func InputParser(input string) (string, []string) {
 	return output, newArr
 }
 
-
 func main() {
 	shell := &Shell{}
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Print("$ ")
+		// 1. Read input
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			break
 		}
 
+		// 2. Clean input (Don't slice manually!)
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
 
-		cmdArr := strings.Fields(input)
-		cmd := strings.TrimSpace(cmdArr[0])
-
-		var args []string
-
-		newInput, newArgsArr := InputParser(input[:len(input)-1])
-
-		if strings.Contains(input, "'") || strings.Contains(input, `"`) || strings.Contains(input, `/`) || strings.Contains(input, `\`) {
-			input = newInput
-			args = newArgsArr[1:]
-			cmd = newArgsArr[0]
-		} else if len(newArgsArr) == 0 {
-			args = cmdArr[1:]
-		} else {
-			args = cmdArr[1:]
+		// 3. Parse with shlex (Handles quotes/backslashes correctly)
+		parts, err := shlex.Split(input)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error parsing input:", err)
+			continue
 		}
 
-		if strings.TrimSpace(input) == "exit 0" {
-			break
-		}
+		// 4. Create the Command Struct
+		cmd := &Command{
+			Args:         []string{},
+			Redirections: []Redirection{},
 		}
 
+		// 5. Populate Args and Redirections
+		for i := 0; i < len(parts); i++ {
+			word := parts[i]
+			if (word == ">" || word == ">>" || word == "2>" || word == "<") && i+1 < len(parts) {
+				var rType RedirectionType
+				switch word {
+				case ">":
+					rType = TokenRedirectOut
+				case ">>":
+					rType = TokenRedirectAppend
+				case "2>":
+					rType = TokenRedirect2
+				case "<":
+					rType = TokenRedirectIn
+				}
+				cmd.Redirections = append(cmd.Redirections, Redirection{Type: rType, Filename: parts[i+1]})
+				i++
+			} else {
+				// Handle the escaped characters cleanup if needed
+				cleanWord := strings.ReplaceAll(word, `\'`, `'`)
+				cleanWord = strings.ReplaceAll(cleanWord, `\"`, `"`)
+				cmd.Args = append(cmd.Args, cleanWord)
+			}
+		}
+
+		// 6. Safety Checks
 		if len(cmd.Args) == 0 {
 			continue
 		}
@@ -155,6 +173,7 @@ func main() {
 			os.Exit(0)
 		}
 
+		// 7. Execute (Inside the loop!)
 		cmd.Execute(shell)
 	}
 }
