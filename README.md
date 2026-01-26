@@ -27,7 +27,20 @@ Supports standard file redirection operators:
 - `>` : Redirect standard output (overwrite).
 - `>>`: Redirect standard output (append).
 - `<` : Redirect standard input.
-- `2>`: Redirect standard error.
+- `2>`: Redirect standard error (overwrite).
+- `2>>`: Redirect standard error (append).
+
+
+### Pipelines (|) 
+Chaining commands together (e.g., cat file.txt | grep "search").
+
+### Autocompletion
+Tab-completion for commands and file paths.
+
+### History Persistence
+- Arrow key navigation (Up/Down) to cycle through previous commands.
+- Saving command history to a file between sessions.
+
 
 ---
 
@@ -53,12 +66,11 @@ Run:
 ```bash
 ./Gosh
 ```
-## Roadmap
-We are actively working on making GoShell fully interactive. The following features are currently in development:
+or Run the following command:
+``` bash
+curl -fsSL https://denishamadhura.vercel.app/install.sh | bash
+```
 
-- [ ] Pipelines (|): Chaining commands together (e.g., cat file.txt | grep "search").
-- [ ] Autocompletion: Tab-completion for commands and file paths.
-- [ ] History Persistence:
-* Arrow key navigation (Up/Down) to cycle through previous commands.
-* Saving command history to a file (~/.gosh_history) between sessions.
-- [ ] Environment Variable Expansion: Support for $USER, $HOME, etc.
+```bash
+gosh
+```
