@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -77,8 +78,10 @@ type Command struct {
 }
 
 var Builtins = map[string]bool{
-	"exit": true, "echo": true, "type": true, "cd": true, "pwd": true,
+	"exit": true, "echo": true, "type": true, "cd": true, "pwd": true, "history": true,
 }
+
+var historyEntries []string
 
 func getPathExecutables() []readline.PrefixCompleterInterface {
 	var items []readline.PrefixCompleterInterface
@@ -196,10 +199,12 @@ func main() {
 		if err != nil {
 			break
 		}
+		inputRaw := input
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
+		historyEntries = append(historyEntries, inputRaw)
 		pipelineParts := parsePipeline(input)
 		executePipeline(pipelineParts)
 	}
@@ -299,6 +304,17 @@ func (c *Command) executeBuiltin(stdin io.Reader, stdout io.Writer, stderr io.Wr
 		}
 	}
 	switch c.Args[0] {
+	case "history":
+		n := len(historyEntries)
+		if len(c.Args) > 1 {
+			if val, err := strconv.Atoi(c.Args[1]); err == nil && val < n {
+				n = val
+			}
+		}
+		start := len(historyEntries) - n
+		for i := start; i < len(historyEntries); i++ {
+			fmt.Fprintf(stdout, "%d  %s\n", i+1, historyEntries[i])
+		}
 	case "echo":
 		fmt.Fprintln(stdout, strings.Join(c.Args[1:], " "))
 	case "type":
