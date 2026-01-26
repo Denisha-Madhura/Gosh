@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/chzyer/readline"
 )
@@ -82,6 +84,7 @@ var Builtins = map[string]bool{
 }
 
 var historyEntries []string
+var sessionStartIndex int
 
 func getPathExecutables() []readline.PrefixCompleterInterface {
 	var items []readline.PrefixCompleterInterface
@@ -181,7 +184,54 @@ func parsePipeline(input string) [][]string {
 	return parts
 }
 
+func loadHistory(path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			historyEntries = append(historyEntries, line)
+		}
+	}
+	sessionStartIndex = len(historyEntries)
+}
+
+func saveHistory(path string, appendOnly bool) {
+	flags := os.O_CREATE | os.O_WRONLY
+	startIdx := 0
+	if appendOnly {
+		flags |= os.O_APPEND
+		startIdx = sessionStartIndex
+	} else {
+		flags |= os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, flags, 0644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	for i := startIdx; i < len(historyEntries); i++ {
+		fmt.Fprintln(file, historyEntries[i])
+	}
+
+	if appendOnly {
+		sessionStartIndex = len(historyEntries)
+	}
+}
+
 func main() {
+	histFile := os.Getenv("HISTFILE")
+	if histFile != "" {
+		loadHistory(histFile)
+	} else {
+		sessionStartIndex = 0
+	}
+
 	completer := readline.NewPrefixCompleter(getPathExecutables()...)
 	l := &bellListener{completer: completer}
 	rl, err := readline.NewEx(&readline.Config{
@@ -194,17 +244,30 @@ func main() {
 		os.Exit(1)
 	}
 	defer rl.Close()
+
 	for {
 		input, err := rl.Readline()
 		if err != nil {
+			if histFile != "" {
+				saveHistory(histFile, false)
+			}
 			break
 		}
-		inputRaw := input
+		rawInput := input
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
-		historyEntries = append(historyEntries, inputRaw)
+
+		historyEntries = append(historyEntries, rawInput)
+
+		if input == "exit" {
+			if histFile != "" {
+				saveHistory(histFile, false)
+			}
+			os.Exit(0)
+		}
+
 		pipelineParts := parsePipeline(input)
 		executePipeline(pipelineParts)
 	}
@@ -212,6 +275,8 @@ func main() {
 
 func executePipeline(parts [][]string) {
 	var nextInput io.ReadCloser
+	var wg sync.WaitGroup
+
 	for i, part := range parts {
 		isLast := i == len(parts)-1
 		var r *io.PipeReader
@@ -223,8 +288,11 @@ func executePipeline(parts [][]string) {
 		if len(cmdObj.Args) == 0 {
 			continue
 		}
+
+		wg.Add(1)
 		if !isLast {
 			go func(c Command, in io.ReadCloser, out io.WriteCloser) {
+				defer wg.Done()
 				c.Execute(in, out, os.Stderr)
 				out.Close()
 				if in != nil {
@@ -233,12 +301,16 @@ func executePipeline(parts [][]string) {
 			}(cmdObj, nextInput, w)
 			nextInput = r
 		} else {
-			cmdObj.Execute(nextInput, os.Stdout, os.Stderr)
-			if nextInput != nil {
-				nextInput.Close()
+			c := cmdObj
+			in := nextInput
+			c.Execute(in, os.Stdout, os.Stderr)
+			if in != nil {
+				in.Close()
 			}
+			wg.Done()
 		}
 	}
+	wg.Wait()
 }
 
 func buildCommand(parts []string) Command {
@@ -272,9 +344,6 @@ func (c *Command) Execute(stdin io.Reader, stdout io.Writer, stderr io.Writer) i
 	if len(c.Args) == 0 {
 		return 0
 	}
-	if c.Args[0] == "exit" {
-		os.Exit(0)
-	}
 	if Builtins[c.Args[0]] {
 		return c.executeBuiltin(stdin, stdout, stderr)
 	}
@@ -305,15 +374,31 @@ func (c *Command) executeBuiltin(stdin io.Reader, stdout io.Writer, stderr io.Wr
 	}
 	switch c.Args[0] {
 	case "history":
+		if len(c.Args) > 2 {
+			flag := c.Args[1]
+			path := c.Args[2]
+			switch flag {
+			case "-r":
+				loadHistory(path)
+			case "-w":
+				saveHistory(path, false)
+			case "-a":
+				saveHistory(path, true)
+			}
+			return 0
+		}
 		n := len(historyEntries)
 		if len(c.Args) > 1 {
-			if val, err := strconv.Atoi(c.Args[1]); err == nil && val < n {
+			if val, err := strconv.Atoi(c.Args[1]); err == nil {
 				n = val
 			}
 		}
-		start := len(historyEntries) - n
+		start := 0
+		if n < len(historyEntries) {
+			start = len(historyEntries) - n
+		}
 		for i := start; i < len(historyEntries); i++ {
-			fmt.Fprintf(stdout, "%d  %s\n", i+1, historyEntries[i])
+			fmt.Fprintf(stdout, "%5d  %s\n", i+1, historyEntries[i])
 		}
 	case "echo":
 		fmt.Fprintln(stdout, strings.Join(c.Args[1:], " "))
