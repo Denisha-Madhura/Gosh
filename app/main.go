@@ -1,14 +1,60 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"github.com/chzyer/readline"
 )
+
+type bellListener struct {
+	completer *readline.PrefixCompleter
+	lastTab   string
+	tabCount  int
+}
+
+func (b *bellListener) OnChange(line []rune, pos int, key rune) (newLine []rune, newPos int, ok bool) {
+	if key == 9 {
+		lineStr := string(line[:pos])
+		if lineStr != b.lastTab {
+			b.tabCount = 1
+			b.lastTab = lineStr
+		} else {
+			b.tabCount++
+		}
+
+		choices, _ := b.completer.Do(line, pos)
+		if len(choices) == 0 {
+			fmt.Print("\x07")
+			return line, pos, true
+		}
+
+		if len(choices) > 1 {
+			if b.tabCount == 1 {
+				fmt.Print("\x07")
+				return line, pos, true
+			} else {
+				results := make([]string, 0, len(choices))
+				for _, c := range choices {
+					suggestion := strings.TrimSpace(string(c))
+					results = append(results, lineStr+suggestion)
+				}
+				sort.Strings(results)
+				fmt.Printf("\n%s\n$ %s", strings.Join(results, "  "), lineStr)
+				return line, pos, true
+			}
+		}
+	} else {
+		b.tabCount = 0
+		b.lastTab = ""
+	}
+	return nil, 0, false
+}
 
 type RedirectionType int
 
@@ -30,21 +76,40 @@ type Command struct {
 	Redirections []Redirection
 }
 
-type Shell struct {
-}
-
 var Builtins = map[string]bool{
 	"exit": true, "echo": true, "type": true, "cd": true, "pwd": true,
 }
 
-func InputParser(input string) (string, []string) {
+func getPathExecutables() []readline.PrefixCompleterInterface {
+	var items []readline.PrefixCompleterInterface
+	for name := range Builtins {
+		items = append(items, readline.PcItem(name))
+	}
+	pathEnv := os.Getenv("PATH")
+	paths := filepath.SplitList(pathEnv)
+	seen := make(map[string]bool)
+	for _, dir := range paths {
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if !f.IsDir() && !seen[f.Name()] {
+				items = append(items, readline.PcItem(f.Name()))
+				seen[f.Name()] = true
+			}
+		}
+	}
+	return items
+}
+
+func InputParser(input string) []string {
 	var word strings.Builder
 	var newArr []string
 	preserveNextLiteral := false
 	backslashInQuotes := false
 	inQuotes := false
 	quoteChar := rune(0)
-
 	for _, ch := range input {
 		if preserveNextLiteral {
 			word.WriteRune(ch)
@@ -61,7 +126,6 @@ func InputParser(input string) (string, []string) {
 			backslashInQuotes = false
 			continue
 		}
-
 		switch {
 		case ch == '"' || ch == '\'':
 			if !inQuotes {
@@ -92,140 +156,151 @@ func InputParser(input string) (string, []string) {
 			word.WriteRune(ch)
 		}
 	}
-
 	if word.Len() > 0 {
 		newArr = append(newArr, word.String())
 	}
-	if len(newArr) == 0 {
-		return "", nil
+	return newArr
+}
+
+func parsePipeline(input string) [][]string {
+	var parts [][]string
+	var currentPart []string
+	rawTokens := InputParser(input)
+	for _, token := range rawTokens {
+		if token == "|" {
+			parts = append(parts, currentPart)
+			currentPart = []string{}
+		} else {
+			currentPart = append(currentPart, token)
+		}
 	}
-
-	noSingles := strings.ReplaceAll(input, "'", "")
-	noDoubles := strings.ReplaceAll(noSingles, `"`, "")
-	output := noDoubles
-
-	return output, newArr
+	parts = append(parts, currentPart)
+	return parts
 }
 
 func main() {
-	shell := &Shell{}
-	reader := bufio.NewReader(os.Stdin)
-
+	completer := readline.NewPrefixCompleter(getPathExecutables()...)
+	l := &bellListener{completer: completer}
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:       "$ ",
+		AutoComplete: completer,
+		Listener:     l,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer rl.Close()
 	for {
-		fmt.Print("$ ")
-		input, err := reader.ReadString('\n')
+		input, err := rl.Readline()
 		if err != nil {
 			break
 		}
-
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
-
-		_, parts := InputParser(input)
-
-		cmd := &Command{
-			Args:         []string{},
-			Redirections: []Redirection{},
-		}
-
-		for i := 0; i < len(parts); i++ {
-			word := parts[i]
-			// Added "1>" to the check list
-			if (word == ">" || word == "1>" || word == ">>" || word == "1>>" || word == "2>" || word == "2>>" || word == "<") && i+1 < len(parts) {
-				var rType RedirectionType
-				switch word {
-				case ">", "1>": // Handle 1> exactly like >
-					rType = TokenRedirectOut
-				case ">>", "1>>":
-					rType = TokenRedirectAppend
-				case "2>":
-					rType = TokenRedirect2
-				case "<":
-					rType = TokenRedirectIn
-				case "2>>":
-					rType = TokenRedirect22
-				}
-				cmd.Redirections = append(cmd.Redirections, Redirection{Type: rType, Filename: parts[i+1]})
-				i++
-			} else {
-				cmd.Args = append(cmd.Args, word)
-			}
-		}
-
-		if len(cmd.Args) == 0 {
-			continue
-		}
-
-		if cmd.Args[0] == "exit" {
-			os.Exit(0)
-		}
-
-		cmd.Execute(shell)
+		pipelineParts := parsePipeline(input)
+		executePipeline(pipelineParts)
 	}
 }
 
-func (c *Command) Execute(shell *Shell) int {
+func executePipeline(parts [][]string) {
+	var nextInput io.ReadCloser
+	for i, part := range parts {
+		isLast := i == len(parts)-1
+		var r *io.PipeReader
+		var w *io.PipeWriter
+		if !isLast {
+			r, w = io.Pipe()
+		}
+		cmdObj := buildCommand(part)
+		if len(cmdObj.Args) == 0 {
+			continue
+		}
+		if !isLast {
+			go func(c Command, in io.ReadCloser, out io.WriteCloser) {
+				c.Execute(in, out, os.Stderr)
+				out.Close()
+				if in != nil {
+					in.Close()
+				}
+			}(cmdObj, nextInput, w)
+			nextInput = r
+		} else {
+			cmdObj.Execute(nextInput, os.Stdout, os.Stderr)
+			if nextInput != nil {
+				nextInput.Close()
+			}
+		}
+	}
+}
+
+func buildCommand(parts []string) Command {
+	cmd := Command{Args: []string{}, Redirections: []Redirection{}}
+	for i := 0; i < len(parts); i++ {
+		word := parts[i]
+		if (word == ">" || word == "1>" || word == ">>" || word == "1>>" || word == "2>" || word == "2>>" || word == "<") && i+1 < len(parts) {
+			var rType RedirectionType
+			switch word {
+			case ">", "1>":
+				rType = TokenRedirectOut
+			case ">>", "1>>":
+				rType = TokenRedirectAppend
+			case "2>":
+				rType = TokenRedirect2
+			case "2>>":
+				rType = TokenRedirect22
+			case "<":
+				rType = TokenRedirectIn
+			}
+			cmd.Redirections = append(cmd.Redirections, Redirection{Type: rType, Filename: parts[i+1]})
+			i++
+		} else {
+			cmd.Args = append(cmd.Args, word)
+		}
+	}
+	return cmd
+}
+
+func (c *Command) Execute(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	if len(c.Args) == 0 {
 		return 0
 	}
-
-	cmdName := c.Args[0]
-
-	if Builtins[cmdName] {
-		return c.executeBuiltin(shell)
+	if c.Args[0] == "exit" {
+		os.Exit(0)
 	}
-
-	return c.executeExternal()
+	if Builtins[c.Args[0]] {
+		return c.executeBuiltin(stdin, stdout, stderr)
+	}
+	return c.executeExternal(stdin, stdout, stderr)
 }
 
-func (c *Command) executeBuiltin(shell *Shell) int {
-	// Standard output setup
-	var stdout io.Writer = os.Stdout
-
-	// Apply Redirections for Builtins
+func (c *Command) executeBuiltin(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	for _, redir := range c.Redirections {
+		os.MkdirAll(filepath.Dir(redir.Filename), 0755)
 		switch redir.Type {
 		case TokenRedirectOut:
-			f, err := os.Create(redir.Filename)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-				return 1
-			}
+			f, _ := os.Create(redir.Filename)
 			defer f.Close()
 			stdout = f
 		case TokenRedirectAppend:
-			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-				return 1
-			}
+			f, _ := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			defer f.Close()
 			stdout = f
 		case TokenRedirect2:
-			f, err := os.Create(redir.Filename)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-				return 1
-			}
+			f, _ := os.Create(redir.Filename)
 			defer f.Close()
+			stderr = f
 		case TokenRedirect22:
-			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-				return 1
-			}
+			f, _ := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			defer f.Close()
+			stderr = f
 		}
 	}
-
-	cmdName := c.Args[0]
-	switch cmdName {
+	switch c.Args[0] {
 	case "echo":
-		// Use Fprintln with the configured stdout
 		fmt.Fprintln(stdout, strings.Join(c.Args[1:], " "))
-		return 0
 	case "type":
 		if len(c.Args) < 2 {
 			return 0
@@ -238,143 +313,82 @@ func (c *Command) executeBuiltin(shell *Shell) int {
 		} else {
 			fmt.Fprintf(stdout, "%s: not found\n", arg)
 		}
-		return 0
 	case "pwd":
 		output, _ := os.Getwd()
 		fmt.Fprintf(stdout, "%s\n", output)
-		return 0
 	case "cd":
-		return doCd(c.Args[1:])
+		path := ""
+		if len(c.Args) == 1 || c.Args[1] == "~" {
+			path = os.Getenv("HOME")
+		} else {
+			path = c.Args[1]
+		}
+		if err := os.Chdir(path); err != nil {
+			fmt.Fprintf(stderr, "cd: %s: No such file or directory\n", path)
+			return 1
+		}
 	}
-	return 1
+	return 0
 }
 
-func (c *Command) executeExternal() int {
-	cmdName := c.Args[0]
-	cmdPath := findInPath(cmdName)
-
+func (c *Command) executeExternal(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	cmdPath := findInPath(c.Args[0])
 	if cmdPath == "" {
-		fmt.Fprintf(os.Stdout, "%s: command not found\n", cmdName)
+		fmt.Fprintf(stderr, "%s: command not found\n", c.Args[0])
 		return 127
 	}
-
 	cmd := exec.Command(cmdPath, c.Args[1:]...)
-	// FIX: Use the original command name as argv[0]
-	cmd.Args = c.Args
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
+	cmd.Args[0] = c.Args[0]
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	for _, redir := range c.Redirections {
+		os.MkdirAll(filepath.Dir(redir.Filename), 0755)
 		switch redir.Type {
 		case TokenRedirectOut:
-			f, err := os.Create(redir.Filename)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
-				return 1
-			}
+			f, _ := os.Create(redir.Filename)
 			defer f.Close()
 			cmd.Stdout = f
 		case TokenRedirectAppend:
-			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
-				return 1
-			}
+			f, _ := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			defer f.Close()
 			cmd.Stdout = f
 		case TokenRedirectIn:
-			f, err := os.Open(redir.Filename)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %s: No such file or directory\n", cmdName, redir.Filename)
-				return 1
-			}
+			f, _ := os.Open(redir.Filename)
 			defer f.Close()
 			cmd.Stdin = f
 		case TokenRedirect2:
-			f, err := os.Create(redir.Filename)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
-				return 1
-			}
+			f, _ := os.Create(redir.Filename)
 			defer f.Close()
 			cmd.Stderr = f
 		case TokenRedirect22:
-			f, err := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %s: %s\n", cmdName, redir.Filename, err)
-				return 1
-			}
+			f, _ := os.OpenFile(redir.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			defer f.Close()
 			cmd.Stderr = f
 		}
 	}
-
-	err := cmd.Run()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode()
 		}
 		return 1
 	}
-
 	return 0
 }
 
 func findInPath(cmdName string) string {
-	if filepath.IsAbs(cmdName) || strings.HasPrefix(cmdName, "./") || strings.HasPrefix(cmdName, "../") {
-		if isExecutable(cmdName) {
+	if filepath.IsAbs(cmdName) || strings.HasPrefix(cmdName, "./") {
+		if _, err := os.Stat(cmdName); err == nil {
 			return cmdName
 		}
-		return ""
 	}
-
 	pathEnv := os.Getenv("PATH")
-	paths := filepath.SplitList(pathEnv)
-
-	for _, dir := range paths {
+	for _, dir := range filepath.SplitList(pathEnv) {
 		fullPath := filepath.Join(dir, cmdName)
-		if isExecutable(fullPath) {
+		info, err := os.Stat(fullPath)
+		if err == nil && !info.IsDir() && info.Mode().Perm()&0111 != 0 {
 			return fullPath
 		}
 	}
-
-	if isExecutable(cmdName) {
-		return cmdName
-	}
-
 	return ""
-}
-
-func isExecutable(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	if !info.Mode().IsRegular() {
-		return false
-	}
-	if info.Mode().Perm()&0111 != 0 {
-		return true
-	}
-	return false
-}
-
-func doCd(args []string) int {
-	path := ""
-	if len(args) == 0 {
-		path = os.Getenv("HOME")
-	} else {
-		path = args[0]
-	}
-
-	if path == "~" {
-		path = os.Getenv("HOME")
-	}
-
-	if err := os.Chdir(path); err != nil {
-		fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n", path)
-		return 1
-	}
-	return 0
 }
